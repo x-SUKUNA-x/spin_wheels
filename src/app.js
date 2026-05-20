@@ -33,9 +33,9 @@ app.use(limiter);
 // Health check — useful for load balancers and container orchestration
 app.get('/health', (_req, res) => res.status(200).json({ status: 'ok' }));
 
-// TODO: mount route modules here as they are created
-// app.use('/api/auth',  require('./routes/auth'));
-// app.use('/api/rooms', require('./routes/rooms'));
+// Routes
+const authRouter = require('./routes/auth.routes');
+app.use('/api/auth', authRouter);
 
 // 404 fallback
 app.use((_req, res) => {
