@@ -1,0 +1,45 @@
+const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+
+const app = express();
+
+// Security headers
+app.use(helmet());
+
+// CORS — only allow the configured client origin
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
+
+// Body parsing
+app.use(express.json());
+
+// Global rate limiter: 100 requests per 15 minutes per IP
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,  // Return rate-limit info in RateLimit-* headers
+  legacyHeaders: false,
+  message: { message: 'Too many requests from this IP. Please try again after 15 minutes.' },
+});
+app.use(limiter);
+
+// Health check — useful for load balancers and container orchestration
+app.get('/health', (_req, res) => res.status(200).json({ status: 'ok' }));
+
+// TODO: mount route modules here as they are created
+// app.use('/api/auth',  require('./routes/auth'));
+// app.use('/api/rooms', require('./routes/rooms'));
+
+// 404 fallback
+app.use((_req, res) => {
+  res.status(404).json({ message: 'Route not found.' });
+});
+
+module.exports = app;
