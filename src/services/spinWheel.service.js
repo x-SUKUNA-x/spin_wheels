@@ -10,6 +10,9 @@ function eliminationService() {
   return require('./elimination.service');
 }
 
+// Lazy-require socket helpers to avoid circular dependency issues.
+const getSocketHelpers = () => require('../socket/index');
+
 /**
  * Fetch the currently active spin wheel (status 'waiting' or 'spinning').
  * @returns {Object|null} Wheel row or null if none exists.
@@ -146,6 +149,13 @@ async function createWheel(adminUserId) {
   // Schedule the auto-start timer — fires after config.auto_start_seconds
   eliminationService().scheduleAutoStart(wheel.id, config.auto_start_seconds);
 
+  // Notify all connected clients that a new wheel is available
+  const { emitToAll } = getSocketHelpers();
+  emitToAll('wheel:created', {
+    wheelId: wheel.id,
+    entryFee: wheel.entry_fee_snapshot,
+  });
+
   return wheel;
 }
 
@@ -222,6 +232,14 @@ async function joinWheel(userId, wheelId) {
     const participant = participantResult.rows[0];
 
     await client.query('COMMIT');
+
+    // Notify all clients in the wheel room that someone joined
+    const { emitToWheel } = getSocketHelpers();
+    emitToWheel(wheelId, 'wheel:participant_joined', {
+      wheelId,
+      userId,
+      participantCount: await getParticipantCount(wheelId),
+    });
 
     return { participant, updatedWheel };
   } catch (err) {

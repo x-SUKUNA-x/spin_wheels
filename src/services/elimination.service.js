@@ -18,27 +18,13 @@
 const { pool, query }        = require('../config/db');
 const { creditCoins }        = require('./coin.service');
 const { getParticipantCount, getConfig, getWheelById } = require('./spinWheel.service');
-const { getIo }              = require('../socket/index');
+const { emitToWheel, emitToUser, emitToAll } = require('../socket/index');
 
 // ── Module-level timer state ────────────────────────────────────────────────
 // wheelId → { autoStartTimer: Timeout|null, eliminationInterval: Timeout|null }
 const activeTimers = new Map();
 
-// ── Socket helper ────────────────────────────────────────────────────────────
 
-/**
- * Emit a socket event. Never throws — failures are just logged.
- * @param {string} event
- * @param {object} payload
- */
-function emit(event, payload) {
-  try {
-    const io = getIo();
-    if (io) io.emit(event, payload);
-  } catch (err) {
-    console.error(`[Elimination] Socket emit failed for "${event}":`, err.message);
-  }
-}
 
 // ── Fisher-Yates shuffle ─────────────────────────────────────────────────────
 
@@ -184,11 +170,12 @@ async function startWheel(wheelId, isAutoStart = false) {
     );
 
     // ── 5. Emit wheel:started ────────────────────────────────────────────────
-    emit('wheel:started', {
+    emitToWheel(wheelId, 'wheel:started', {
       wheelId,
       participantCount,
-      eliminationOrder: participants.map((p) => p.user_id), // shuffled order
+      eliminationOrder: participants.map((p) => p.user_id),
     });
+    emitToAll('wheel:new_active', { wheelId });
 
     console.log(`[Elimination] Wheel ${wheelId} started (auto=${isAutoStart}), ${participantCount} participants`);
 
@@ -237,11 +224,15 @@ async function scheduleNextElimination(wheelId, currentOrder, participants, inte
       );
 
       const remainingCount = participants.length - currentOrder; // excludes winner
-      emit('wheel:elimination', {
+      emitToWheel(wheelId, 'wheel:elimination', {
         wheelId,
         eliminatedUserId: target.user_id,
         eliminationOrder: currentOrder,
         remainingCount,
+      });
+      emitToUser(target.user_id, 'wheel:you_were_eliminated', {
+        wheelId,
+        eliminationOrder: currentOrder,
       });
 
       console.log(`[Elimination] Wheel ${wheelId}: eliminated order ${currentOrder}, remaining=${remainingCount}`);
@@ -322,7 +313,7 @@ async function abortWheel(wheelId, reason = 'Wheel aborted') {
     }
 
     // 5. Emit and clean up
-    emit('wheel:aborted', { wheelId, reason, refundedCount: participants.length });
+    emitToWheel(wheelId, 'wheel:aborted', { wheelId, reason, refundedCount: participants.length });
     cancelAutoStart(wheelId);
     cleanupTimers(wheelId);
   } catch (err) {
@@ -409,11 +400,15 @@ async function finalizeWinner(wheelId) {
       client.release();
     }
 
-    emit('wheel:completed', {
+    emitToWheel(wheelId, 'wheel:completed', {
       wheelId,
       winnerUserId,
       winnerAmount,
       adminAmount,
+    });
+    emitToUser(winnerUserId, 'wheel:you_won', {
+      wheelId,
+      amount: winnerAmount,
     });
 
     cleanupTimers(wheelId);
