@@ -102,8 +102,12 @@ function scheduleAutoStart(wheelId, delaySeconds) {
   console.log(`[Elimination] Auto-start scheduled for wheel ${wheelId} in ${delaySeconds}s`);
 
   entry.autoStartTimer = setTimeout(async () => {
-    console.log(`[Elimination] Auto-start timer fired for wheel ${wheelId}`);
-    await startWheel(wheelId, true);
+    try {
+      console.log(`[Elimination] Auto-start timer fired for wheel ${wheelId}`);
+      await startWheel(wheelId, true);
+    } catch (err) {
+      console.error(`[Elimination] Auto-start callback error for wheel ${wheelId}:`, err.message);
+    }
   }, delaySeconds * 1000);
 }
 

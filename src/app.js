@@ -45,4 +45,14 @@ app.use((_req, res) => {
   res.status(404).json({ message: 'Route not found.' });
 });
 
+// Global error handler — catches anything that slips past controllers
+app.use((err, _req, res, _next) => {
+  console.error('[App] Unhandled error:', err);
+  const statusCode = err.statusCode || 500;
+  res.status(statusCode).json({
+    success: false,
+    message: err.isOperational ? err.message : 'Internal server error',
+  });
+});
+
 module.exports = app;

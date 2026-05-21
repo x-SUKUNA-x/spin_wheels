@@ -36,12 +36,8 @@ const { creditCoins } = require('../src/services/coin.service');
 const PORT     = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// Default config values from migration 003
-const ENTRY_FEE          = 10.00;
-const WINNER_PCT         = 70;   // 70%  → 7.00 per participant
-const ADMIN_PCT          = 20;   // 20%  → 2.00 per participant
-const ELIM_INTERVAL_SECS = 7;    // 7s per elimination step
-const MIN_PARTICIPANTS   = 3;
+// Game config — fetched from DB at runtime
+let ENTRY_FEE, WINNER_PCT, ADMIN_PCT, ELIM_INTERVAL_SECS, MIN_PARTICIPANTS;
 
 // ── Test accounts ─────────────────────────────────────────────────────────────
 
@@ -121,6 +117,15 @@ async function getTransactions(userId, type) {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 async function setup() {
+  // Fetch live config from DB so tests stay in sync with migration defaults
+  const configRes = await pool.query('SELECT * FROM spin_wheel_config LIMIT 1');
+  const config = configRes.rows[0];
+  ENTRY_FEE          = parseFloat(config.entry_fee);
+  WINNER_PCT         = parseFloat(config.winner_pool_percent);
+  ADMIN_PCT          = parseFloat(config.admin_pool_percent);
+  ELIM_INTERVAL_SECS = parseInt(config.elimination_interval_seconds, 10);
+  MIN_PARTICIPANTS   = parseInt(config.min_participants, 10);
+
   section('Setup — register accounts');
 
   // Register admin
