@@ -37,6 +37,9 @@ app.get('/health', (_req, res) => res.status(200).json({ status: 'ok' }));
 const authRouter = require('./routes/auth.routes');
 app.use('/api/auth', authRouter);
 
+const spinWheelRouter = require('./routes/spinWheel.routes');
+app.use('/api/wheels', spinWheelRouter);
+
 // 404 fallback
 app.use((_req, res) => {
   res.status(404).json({ message: 'Route not found.' });
