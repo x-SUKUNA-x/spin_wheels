@@ -105,4 +105,62 @@ async function getActiveWheel(req, res) {
   }
 }
 
-module.exports = { createWheel, joinWheel, getWheel, getActiveWheel };
+/**
+ * POST /api/wheels/:wheelId/start
+ * Admin only. Manually starts the wheel (bypasses auto-start timer).
+ */
+async function startWheel(req, res) {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Admin access required.' });
+  }
+
+  const { wheelId } = req.params;
+
+  if (!UUID_REGEX.test(wheelId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid wheel ID format. Expected a valid UUID v4.',
+    });
+  }
+
+  try {
+    const wheel = await spinWheelService.manualStartWheel(req.user.id, wheelId);
+    return res.status(200).json({
+      success: true,
+      data: { message: 'Wheel started', wheel },
+    });
+  } catch (err) {
+    return sendError(res, err);
+  }
+}
+
+/**
+ * POST /api/wheels/:wheelId/abort
+ * Admin only. Aborts the wheel and refunds all participants.
+ */
+async function abortWheel(req, res) {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Admin access required.' });
+  }
+
+  const { wheelId } = req.params;
+
+  if (!UUID_REGEX.test(wheelId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid wheel ID format. Expected a valid UUID v4.',
+    });
+  }
+
+  try {
+    await spinWheelService.adminAbortWheel(req.user.id, wheelId);
+    return res.status(200).json({
+      success: true,
+      data: { message: 'Wheel aborted and participants refunded' },
+    });
+  } catch (err) {
+    return sendError(res, err);
+  }
+}
+
+module.exports = { createWheel, joinWheel, getWheel, getActiveWheel, startWheel, abortWheel };

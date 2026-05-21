@@ -8,7 +8,9 @@
     "dev": "nodemon server.js",
     "migrate": "node migrations/run_migrations.js",
     "verify": "node scripts/verify.js",
-    "test:auth": "node scripts/test_auth.js"
+    "test:auth": "node scripts/test_auth.js",
+    "test:phase4": "node scripts/test_phase4.js",
+    "test:phase5": "node scripts/test_phase5.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

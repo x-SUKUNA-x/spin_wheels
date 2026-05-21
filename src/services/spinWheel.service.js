@@ -2,6 +2,14 @@ const { pool, query } = require('../config/db');
 const { debitCoins } = require('./coin.service');
 const AppError = require('../utils/AppError');
 
+// Lazy-require to avoid circular dependency at module load time.
+// elimination.service → spinWheel.service (getWheelById, etc.)
+// spinWheel.service   → elimination.service (scheduleAutoStart, etc.)
+// Using a getter function breaks the cycle.
+function eliminationService() {
+  return require('./elimination.service');
+}
+
 /**
  * Fetch the currently active spin wheel (status 'waiting' or 'spinning').
  * @returns {Object|null} Wheel row or null if none exists.
@@ -133,7 +141,12 @@ async function createWheel(adminUserId) {
     ],
   );
 
-  return result.rows[0];
+  const wheel = result.rows[0];
+
+  // Schedule the auto-start timer — fires after config.auto_start_seconds
+  eliminationService().scheduleAutoStart(wheel.id, config.auto_start_seconds);
+
+  return wheel;
 }
 
 /**
@@ -232,6 +245,66 @@ async function getParticipantCount(wheelId) {
   return parseInt(result.rows[0].count, 10);
 }
 
+/**
+ * Manually start a wheel (admin only).
+ * Cancels the auto-start timer, then calls the elimination engine.
+ *
+ * @param {string} adminUserId
+ * @param {string} wheelId
+ * @returns {Object} Updated wheel row
+ */
+async function manualStartWheel(adminUserId, wheelId) {
+  // Verify admin role from DB (don't trust token alone for destructive actions)
+  const userResult = await query('SELECT role FROM users WHERE id = $1', [adminUserId]);
+  if (userResult.rows.length === 0 || userResult.rows[0].role !== 'admin') {
+    throw new AppError('Admin access required.', 403, 'FORBIDDEN');
+  }
+
+  const wheel = await getWheelById(wheelId);
+  if (!wheel) {
+    throw new AppError('Wheel not found', 404, 'WHEEL_NOT_FOUND');
+  }
+  if (wheel.status !== 'waiting') {
+    throw new AppError('Wheel cannot be started — it is not in waiting status', 400, 'WHEEL_NOT_WAITING');
+  }
+
+  // Cancel the auto-start timer before handing control to the engine
+  eliminationService().cancelAutoStart(wheelId);
+
+  // startWheel is fire-and-forget safe, but we await here so the
+  // DB status is updated before we return the response.
+  await eliminationService().startWheel(wheelId, false);
+
+  // Return the freshly updated wheel
+  return await getWheelById(wheelId);
+}
+
+/**
+ * Admin aborts a wheel, triggering refunds for all participants.
+ *
+ * @param {string} adminUserId
+ * @param {string} wheelId
+ * @returns {{ aborted: true }}
+ */
+async function adminAbortWheel(adminUserId, wheelId) {
+  const userResult = await query('SELECT role FROM users WHERE id = $1', [adminUserId]);
+  if (userResult.rows.length === 0 || userResult.rows[0].role !== 'admin') {
+    throw new AppError('Admin access required.', 403, 'FORBIDDEN');
+  }
+
+  const wheel = await getWheelById(wheelId);
+  if (!wheel) {
+    throw new AppError('Wheel not found', 404, 'WHEEL_NOT_FOUND');
+  }
+  if (!['waiting', 'spinning'].includes(wheel.status)) {
+    throw new AppError('Wheel cannot be aborted — it is already completed or aborted', 400, 'WHEEL_NOT_ABORTABLE');
+  }
+
+  await eliminationService().abortWheel(wheelId, 'Manually aborted by admin');
+
+  return { aborted: true };
+}
+
 module.exports = {
   getActiveWheel,
   getWheelById,
@@ -240,4 +313,6 @@ module.exports = {
   createWheel,
   joinWheel,
   getParticipantCount,
+  manualStartWheel,
+  adminAbortWheel,
 };
