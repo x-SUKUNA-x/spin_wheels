@@ -166,3 +166,56 @@ npm run test:phase7
 - Admin who creates the wheel receives the admin pool payout
 - Minimum 3 participants is configurable via the admin config API
 - Socket connections require a valid JWT — no anonymous spectators
+
+## Performance Considerations
+
+1. **Row-level locks over table locks** — `SELECT ... FOR UPDATE` locks only the affected user row during coin operations, allowing concurrent joins by different users without blocking each other.
+2. **Config snapshots** — Copying config values to `spin_wheels` at creation time avoids a config table join on every elimination step.
+3. **Indexed foreign keys** — All FK columns and frequently queried fields (`status`, `user_id`, `spin_wheel_id`) are indexed in migration 006, keeping participant lookups fast even with many wheels.
+4. **In-memory timer state** — The elimination loop uses Node.js `setTimeout` chains rather than polling the DB every second, eliminating unnecessary DB load during the game.
+5. **Single transaction for bulk refunds** — On abort, all participant refunds are wrapped in one `BEGIN/COMMIT` block rather than one transaction per user, reducing round-trips to the DB.
+6. **Fire-and-forget socket emissions** — Socket events are never awaited, so a slow client can never block the elimination loop.
+7. **Parameterized queries** — All SQL uses `$1, $2` placeholders, allowing PostgreSQL to cache query plans and skip re-parsing on repeated executions.
+
+## Architecture Diagram
+
+```
+                ┌─────────────────────────────────┐
+                │           Client App             │
+                │   (HTTP REST + Socket.io WS)     │
+                └────────────┬────────────────────┘
+                             │
+                ┌────────────▼────────────────────┐
+                │         Node.js Server           │
+                │                                  │
+                │  ┌─────────┐  ┌──────────────┐  │
+                │  │ Express │  │  Socket.io   │  │
+                │  │ Routes  │  │  (JWT auth)  │  │
+                │  └────┬────┘  └──────┬───────┘  │
+                │       │               │          │
+                │  ┌────▼───────────────▼──────┐  │
+                │  │       Controllers          │  │
+                │  └────────────┬───────────────┘  │
+                │               │                  │
+                │  ┌────────────▼───────────────┐  │
+                │  │         Services            │  │
+                │  │                            │  │
+                │  │  auth  │ spinWheel │ coin  │  │
+                │  │  admin │ elimination│ txn  │  │
+                │  └────────────┬───────────────┘  │
+                │               │                  │
+                │  ┌────────────▼───────────────┐  │
+                │  │   elimination.service.js   │  │
+                │  │   (in-memory state machine)│  │
+                │  │   activeTimers: Map        │  │
+                │  └────────────┬───────────────┘  │
+                └───────────────┼──────────────────┘
+                                │
+                ┌───────────────▼──────────────────┐
+                │         PostgreSQL               │
+                │                                  │
+                │  users │ spin_wheels │ txns      │
+                │  spin_wheel_participants         │
+                │  spin_wheel_config               │
+                └──────────────────────────────────┘
+```
