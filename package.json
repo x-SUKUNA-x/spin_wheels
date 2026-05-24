@@ -23,7 +23,6 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0",
-    "rate-limit-redis": "^5.0.0",
     "socket.io": "^4.7.5",
     "uuid": "^10.0.0"
   },
