@@ -127,80 +127,17 @@ async function loginUser({ email, password }) {
 }
 
 /**
- * Sign a JWT for the given user and generate a refresh token.
- * @returns {Promise<{ accessToken: string, refreshToken: string }>}
+ * Sign a JWT for the given user.
+ * @returns {Promise<{ accessToken: string }>}
  */
 async function generateAuthTokens(user) {
   const accessToken = jwt.sign(
     { id: user.id, role: user.role },
     process.env.JWT_SECRET,
-    { expiresIn: '15m' }, // Short-lived access token
+    { expiresIn: '24h' }, // Longer expiration since no refresh
   );
 
-  const refreshToken = crypto.randomBytes(40).toString('hex');
-  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-
-  // Expiration of 7 days
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7);
-
-  await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-    [user.id, tokenHash, expiresAt]
-  );
-
-  return { accessToken, refreshToken };
-}
-
-/**
- * Exchange a valid refresh token for new tokens.
- * @param {string} refreshToken
- * @returns {Promise<{ accessToken: string, refreshToken: string, user: object }>}
- */
-async function refreshAccessToken(refreshToken) {
-  if (!refreshToken) {
-    throw new AppError('Refresh token is required.', 400, 'VALIDATION_ERROR');
-  }
-
-  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-
-  const result = await query(
-    `SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked, u.id as uid, u.username, u.email, u.role, u.coin_balance
-     FROM refresh_tokens rt
-     JOIN users u ON rt.user_id = u.id
-     WHERE rt.token_hash = $1`,
-    [tokenHash]
-  );
-
-  if (result.rows.length === 0) {
-    throw new AppError('Invalid refresh token.', 401, 'INVALID_TOKEN');
-  }
-
-  const tokenData = result.rows[0];
-
-  if (tokenData.revoked) {
-    // A revoked token was used — potential theft. Revoke all tokens for user.
-    await query(`UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, [tokenData.user_id]);
-    throw new AppError('Token has been revoked.', 401, 'REVOKED_TOKEN');
-  }
-
-  if (new Date() > new Date(tokenData.expires_at)) {
-    throw new AppError('Refresh token expired.', 401, 'EXPIRED_TOKEN');
-  }
-
-  // Revoke the used token (rotation)
-  await query(`UPDATE refresh_tokens SET revoked = TRUE WHERE id = $1`, [tokenData.id]);
-
-  const user = {
-    id: tokenData.uid,
-    username: tokenData.username,
-    email: tokenData.email,
-    role: tokenData.role,
-    coin_balance: tokenData.coin_balance,
-  };
-
-  const tokens = await generateAuthTokens(user);
-  return { ...tokens, user };
+  return { accessToken };
 }
 
 /**
@@ -215,4 +152,4 @@ async function getUserById(id) {
   return result.rows[0] || null;
 }
 
-module.exports = { registerUser, loginUser, generateAuthTokens, refreshAccessToken, getUserById };
+module.exports = { registerUser, loginUser, generateAuthTokens, getUserById };

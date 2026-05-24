@@ -20,11 +20,8 @@ const { creditCoins }        = require('./coin.service');
 const { getParticipantCount, getConfig, getWheelById } = require('./spinWheel.service');
 const { emitToWheel, emitToUser, emitToAll } = require('../socket/index');
 const crypto = require('crypto');
-const { autoStartQueue, eliminationQueue } = require('../queue/elimination.queue');
-
-
-
-// ── Fisher-Yates shuffle ─────────────────────────────────────────────────────
+const autoStartTimers = new Map();
+const eliminationTimers = new Map();// ── Fisher-Yates shuffle ─────────────────────────────────────────────────────
 
 /**
  * In-place deterministic shuffle using a cryptographic seed.
@@ -58,19 +55,16 @@ function seededShuffle(arr, seed) {
 async function scheduleAutoStart(wheelId, delaySeconds) {
   console.log(`[Elimination] Auto-start scheduled for wheel ${wheelId} in ${delaySeconds}s`);
 
-  // Remove existing auto-start jobs for this wheel
-  const existingJobs = await autoStartQueue.getDelayed();
-  for (const job of existingJobs) {
-    if (job.data.wheelId === wheelId) {
-      await job.remove();
-    }
+  if (autoStartTimers.has(wheelId)) {
+    clearTimeout(autoStartTimers.get(wheelId));
   }
 
-  await autoStartQueue.add(
-    'auto-start',
-    { wheelId },
-    { delay: delaySeconds * 1000, jobId: `autostart-${wheelId}` }
-  );
+  const timer = setTimeout(async () => {
+    autoStartTimers.delete(wheelId);
+    await startWheel(wheelId, true);
+  }, delaySeconds * 1000);
+
+  autoStartTimers.set(wheelId, timer);
 }
 
 /**
@@ -79,12 +73,10 @@ async function scheduleAutoStart(wheelId, delaySeconds) {
  * @param {string} wheelId
  */
 async function cancelAutoStart(wheelId) {
-  const existingJobs = await autoStartQueue.getDelayed();
-  for (const job of existingJobs) {
-    if (job.data.wheelId === wheelId) {
-      await job.remove();
-      console.log(`[Elimination] Auto-start timer cancelled for wheel ${wheelId}`);
-    }
+  if (autoStartTimers.has(wheelId)) {
+    clearTimeout(autoStartTimers.get(wheelId));
+    autoStartTimers.delete(wheelId);
+    console.log(`[Elimination] Auto-start timer cancelled for wheel ${wheelId}`);
   }
 }
 
@@ -188,11 +180,12 @@ async function scheduleNextElimination(wheelId, currentOrder, participants, inte
     return;
   }
 
-  await eliminationQueue.add(
-    'elimination-step',
-    { wheelId, currentOrder, participants, intervalSeconds },
-    { delay: intervalSeconds * 1000, jobId: `elimination-${wheelId}-${currentOrder}` }
-  );
+  const timer = setTimeout(async () => {
+    eliminationTimers.delete(wheelId);
+    await executeEliminationStep(wheelId, currentOrder, participants, intervalSeconds);
+  }, intervalSeconds * 1000);
+
+  eliminationTimers.set(wheelId, timer);
 }
 
 /**
@@ -258,11 +251,9 @@ async function resumeSpinningWheel(wheelId) {
  * Cancel any pending eliminations (called during abort).
  */
 async function cancelEliminationInterval(wheelId) {
-  const existingJobs = await eliminationQueue.getDelayed();
-  for (const job of existingJobs) {
-    if (job.data.wheelId === wheelId) {
-      await job.remove();
-    }
+  if (eliminationTimers.has(wheelId)) {
+    clearTimeout(eliminationTimers.get(wheelId));
+    eliminationTimers.delete(wheelId);
   }
 }
 

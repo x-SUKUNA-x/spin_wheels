@@ -1,4 +1,4 @@
-const { registerUser, loginUser, generateAuthTokens, refreshAccessToken, getUserById } = require('../services/auth.service');
+const { registerUser, loginUser, generateAuthTokens, getUserById } = require('../services/auth.service');
 
 async function register(req, res) {
   try {
@@ -6,7 +6,7 @@ async function register(req, res) {
     const user = await registerUser({ username, email, password, role });
     const tokens = await generateAuthTokens(user);
 
-    return res.status(201).json({ success: true, data: { user, token: tokens.accessToken, refreshToken: tokens.refreshToken } });
+    return res.status(201).json({ success: true, data: { user, token: tokens.accessToken } });
   } catch (err) {
     if (err.isOperational) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
@@ -22,7 +22,7 @@ async function login(req, res) {
     const user = await loginUser({ email, password });
     const tokens = await generateAuthTokens(user);
 
-    return res.status(200).json({ success: true, data: { user, token: tokens.accessToken, refreshToken: tokens.refreshToken } });
+    return res.status(200).json({ success: true, data: { user, token: tokens.accessToken } });
   } catch (err) {
     if (err.isOperational) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
@@ -47,19 +47,4 @@ async function getMe(req, res) {
   }
 }
 
-async function refresh(req, res) {
-  try {
-    const { refreshToken } = req.body;
-    const { accessToken, refreshToken: newRefreshToken, user } = await refreshAccessToken(refreshToken);
-
-    return res.status(200).json({ success: true, data: { user, token: accessToken, refreshToken: newRefreshToken } });
-  } catch (err) {
-    if (err.isOperational) {
-      return res.status(err.statusCode).json({ success: false, message: err.message });
-    }
-    console.error('[AuthController] refresh error:', err);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-}
-
-module.exports = { register, login, getMe, refresh };
+module.exports = { register, login, getMe };
