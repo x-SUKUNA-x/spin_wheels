@@ -1,12 +1,12 @@
-const { registerUser, loginUser, generateToken, getUserById } = require('../services/auth.service');
+const { registerUser, loginUser, generateAuthTokens, refreshAccessToken, getUserById } = require('../services/auth.service');
 
 async function register(req, res) {
   try {
     const { username, email, password, role } = req.body;
     const user = await registerUser({ username, email, password, role });
-    const token = generateToken(user);
+    const tokens = await generateAuthTokens(user);
 
-    return res.status(201).json({ success: true, data: { user, token } });
+    return res.status(201).json({ success: true, data: { user, token: tokens.accessToken, refreshToken: tokens.refreshToken } });
   } catch (err) {
     if (err.isOperational) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
@@ -20,9 +20,9 @@ async function login(req, res) {
   try {
     const { email, password } = req.body;
     const user = await loginUser({ email, password });
-    const token = generateToken(user);
+    const tokens = await generateAuthTokens(user);
 
-    return res.status(200).json({ success: true, data: { user, token } });
+    return res.status(200).json({ success: true, data: { user, token: tokens.accessToken, refreshToken: tokens.refreshToken } });
   } catch (err) {
     if (err.isOperational) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
@@ -47,4 +47,19 @@ async function getMe(req, res) {
   }
 }
 
-module.exports = { register, login, getMe };
+async function refresh(req, res) {
+  try {
+    const { refreshToken } = req.body;
+    const { accessToken, refreshToken: newRefreshToken, user } = await refreshAccessToken(refreshToken);
+
+    return res.status(200).json({ success: true, data: { user, token: accessToken, refreshToken: newRefreshToken } });
+  } catch (err) {
+    if (err.isOperational) {
+      return res.status(err.statusCode).json({ success: false, message: err.message });
+    }
+    console.error('[AuthController] refresh error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+}
+
+module.exports = { register, login, getMe, refresh };

@@ -1,6 +1,7 @@
 const { pool, query } = require('../config/db');
 const { debitCoins } = require('./coin.service');
 const AppError = require('../utils/AppError');
+const crypto = require('crypto');
 
 // Lazy-require to avoid circular dependency at module load time.
 // elimination.service → spinWheel.service (getWheelById, etc.)
@@ -126,14 +127,18 @@ async function createWheel(adminUserId) {
 
   const config = await getConfig();
 
+  const serverSeed = crypto.randomBytes(32).toString('hex');
+  const serverSeedHash = crypto.createHash('sha256').update(serverSeed).digest('hex');
+
   const result = await query(
     `INSERT INTO spin_wheels
        (created_by, status,
         entry_fee_snapshot,
         winner_pool_percent_snapshot,
         admin_pool_percent_snapshot,
-        app_pool_percent_snapshot)
-     VALUES ($1, 'waiting', $2, $3, $4, $5)
+        app_pool_percent_snapshot,
+        server_seed, server_seed_hash)
+     VALUES ($1, 'waiting', $2, $3, $4, $5, $6, $7)
      RETURNING *`,
     [
       adminUserId,
@@ -141,6 +146,8 @@ async function createWheel(adminUserId) {
       config.winner_pool_percent,
       config.admin_pool_percent,
       config.app_pool_percent,
+      serverSeed,
+      serverSeedHash
     ],
   );
 

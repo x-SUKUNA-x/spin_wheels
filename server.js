@@ -11,12 +11,16 @@ const PORT = process.env.PORT || 3000;
 // Wrap Express in a raw HTTP server so Socket.io can share the same port
 const server = http.createServer(app);
 
+const { createAdapter } = require('@socket.io/redis-adapter');
+const { redisClient, redisSubscriber } = require('./src/config/redis');
+
 // Attach Socket.io with CORS restricted to the client origin
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL,
     methods: ['GET', 'POST'],
   },
+  adapter: createAdapter(redisClient, redisSubscriber),
 });
 
 initSocket(io);

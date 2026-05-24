@@ -19,53 +19,33 @@ const { pool, query }        = require('../config/db');
 const { creditCoins }        = require('./coin.service');
 const { getParticipantCount, getConfig, getWheelById } = require('./spinWheel.service');
 const { emitToWheel, emitToUser, emitToAll } = require('../socket/index');
-
-// ── Module-level timer state ────────────────────────────────────────────────
-// wheelId → { autoStartTimer: Timeout|null, eliminationInterval: Timeout|null }
-const activeTimers = new Map();
+const crypto = require('crypto');
+const { autoStartQueue, eliminationQueue } = require('../queue/elimination.queue');
 
 
 
 // ── Fisher-Yates shuffle ─────────────────────────────────────────────────────
 
 /**
- * In-place Fisher-Yates shuffle.
+ * In-place deterministic shuffle using a cryptographic seed.
  * @template T
  * @param {T[]} arr
- * @returns {T[]} The same array, shuffled.
+ * @param {string} seed
+ * @returns {T[]} The same array, shuffled deterministically.
  */
-function shuffle(arr) {
+function seededShuffle(arr, seed) {
+  let currentSeed = crypto.createHash('sha256').update(seed).digest('hex');
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    // Use first 8 hex characters (32 bits)
+    const randInt = parseInt(currentSeed.substring(0, 8), 16);
+    const j = randInt % (i + 1);
     [arr[i], arr[j]] = [arr[j], arr[i]];
+    currentSeed = crypto.createHash('sha256').update(currentSeed).digest('hex');
   }
   return arr;
 }
 
 // ── Timer helpers ─────────────────────────────────────────────────────────────
-
-/**
- * Ensure an entry exists in activeTimers for this wheel.
- * @param {string} wheelId
- */
-function ensureTimerEntry(wheelId) {
-  if (!activeTimers.has(wheelId)) {
-    activeTimers.set(wheelId, { autoStartTimer: null, eliminationInterval: null });
-  }
-}
-
-/**
- * Clean up all timers for a wheel and remove its entry from the map.
- * @param {string} wheelId
- */
-function cleanupTimers(wheelId) {
-  const entry = activeTimers.get(wheelId);
-  if (!entry) return;
-  if (entry.autoStartTimer)    clearTimeout(entry.autoStartTimer);
-  if (entry.eliminationInterval) clearTimeout(entry.eliminationInterval);
-  activeTimers.delete(wheelId);
-  console.log(`[Elimination] Timers cleaned up for wheel ${wheelId}`);
-}
 
 // ── Exported functions ────────────────────────────────────────────────────────
 
@@ -75,26 +55,22 @@ function cleanupTimers(wheelId) {
  * @param {string} wheelId
  * @param {number} delaySeconds
  */
-function scheduleAutoStart(wheelId, delaySeconds) {
-  ensureTimerEntry(wheelId);
-  const entry = activeTimers.get(wheelId);
-
-  // Clear any previous auto-start timer for this wheel
-  if (entry.autoStartTimer) {
-    clearTimeout(entry.autoStartTimer);
-    entry.autoStartTimer = null;
-  }
-
+async function scheduleAutoStart(wheelId, delaySeconds) {
   console.log(`[Elimination] Auto-start scheduled for wheel ${wheelId} in ${delaySeconds}s`);
 
-  entry.autoStartTimer = setTimeout(async () => {
-    try {
-      console.log(`[Elimination] Auto-start timer fired for wheel ${wheelId}`);
-      await startWheel(wheelId, true);
-    } catch (err) {
-      console.error(`[Elimination] Auto-start callback error for wheel ${wheelId}:`, err.message);
+  // Remove existing auto-start jobs for this wheel
+  const existingJobs = await autoStartQueue.getDelayed();
+  for (const job of existingJobs) {
+    if (job.data.wheelId === wheelId) {
+      await job.remove();
     }
-  }, delaySeconds * 1000);
+  }
+
+  await autoStartQueue.add(
+    'auto-start',
+    { wheelId },
+    { delay: delaySeconds * 1000, jobId: `autostart-${wheelId}` }
+  );
 }
 
 /**
@@ -102,13 +78,13 @@ function scheduleAutoStart(wheelId, delaySeconds) {
  * or the wheel is aborted before it fires).
  * @param {string} wheelId
  */
-function cancelAutoStart(wheelId) {
-  const entry = activeTimers.get(wheelId);
-  if (!entry) return;
-  if (entry.autoStartTimer) {
-    clearTimeout(entry.autoStartTimer);
-    entry.autoStartTimer = null;
-    console.log(`[Elimination] Auto-start timer cancelled for wheel ${wheelId}`);
+async function cancelAutoStart(wheelId) {
+  const existingJobs = await autoStartQueue.getDelayed();
+  for (const job of existingJobs) {
+    if (job.data.wheelId === wheelId) {
+      await job.remove();
+      console.log(`[Elimination] Auto-start timer cancelled for wheel ${wheelId}`);
+    }
   }
 }
 
@@ -149,8 +125,13 @@ async function startWheel(wheelId, isAutoStart = false) {
     );
     const participants = pResult.rows; // [{ id, user_id }, ...]
 
+    // Generate client seed if not provided (for now just randomly generate it)
+    const clientSeed = crypto.randomBytes(16).toString('hex');
+    const combinedSeed = `${wheel.server_seed}:${clientSeed}`;
+    const finalHash = crypto.createHash('sha256').update(combinedSeed).digest('hex');
+
     // Shuffle — last element is the winner (never gets an elimination_order)
-    shuffle(participants);
+    seededShuffle(participants, finalHash);
 
     const toEliminate = participants.slice(0, participants.length - 1); // everyone except last
     // The winner is the last element after shuffle; identity tracked via elimination_order IS NULL in DB
@@ -163,10 +144,13 @@ async function startWheel(wheelId, isAutoStart = false) {
       );
     }
 
-    // ── 4. Mark wheel as spinning ────────────────────────────────────────────
+    // ── 4. Mark wheel as spinning and save final seeds ────────────────────────
     await query(
-      `UPDATE spin_wheels SET status = 'spinning', started_at = now(), updated_at = now() WHERE id = $1`,
-      [wheelId],
+      `UPDATE spin_wheels 
+       SET status = 'spinning', started_at = now(), updated_at = now(),
+           client_seed = $2, final_hash = $3
+       WHERE id = $1`,
+      [wheelId, clientSeed, finalHash],
     );
 
     // ── 5. Emit wheel:started ────────────────────────────────────────────────
@@ -191,62 +175,95 @@ async function startWheel(wheelId, isAutoStart = false) {
 }
 
 /**
- * Schedule the next elimination step.
+ * Schedule the next elimination step via BullMQ.
  *
  * @param {string} wheelId
- * @param {number} currentOrder         - The elimination_order to fire next
- * @param {Array}  participants         - All participants-to-eliminate, each with { user_id, elimination_order }
+ * @param {number} currentOrder
+ * @param {Array}  participants
  * @param {number} intervalSeconds
  */
 async function scheduleNextElimination(wheelId, currentOrder, participants, intervalSeconds) {
-  // All eliminations done — find the winner
   if (currentOrder > participants.length) {
     await finalizeWinner(wheelId);
     return;
   }
 
-  ensureTimerEntry(wheelId);
+  await eliminationQueue.add(
+    'elimination-step',
+    { wheelId, currentOrder, participants, intervalSeconds },
+    { delay: intervalSeconds * 1000, jobId: `elimination-${wheelId}-${currentOrder}` }
+  );
+}
 
-  const timer = setTimeout(async () => {
-    try {
-      const target = participants.find((p) => p.elimination_order === currentOrder);
-      if (!target) {
-        console.error(`[Elimination] No participant with elimination_order=${currentOrder} for wheel ${wheelId}`);
-        return;
-      }
+/**
+ * Execute one step of elimination (called by the BullMQ worker).
+ */
+async function executeEliminationStep(wheelId, currentOrder, participants, intervalSeconds) {
+  const target = participants.find((p) => p.elimination_order === currentOrder);
+  if (!target) {
+    console.error(`[Elimination] No participant with elimination_order=${currentOrder} for wheel ${wheelId}`);
+    return;
+  }
 
-      // Mark participant as eliminated
-      await query(
-        `UPDATE spin_wheel_participants
-         SET eliminated_at = now()
-         WHERE spin_wheel_id = $1 AND elimination_order = $2`,
-        [wheelId, currentOrder],
-      );
+  await query(
+    `UPDATE spin_wheel_participants
+     SET eliminated_at = now()
+     WHERE spin_wheel_id = $1 AND elimination_order = $2 AND eliminated_at IS NULL`,
+    [wheelId, currentOrder],
+  );
 
-      const remainingCount = participants.length - currentOrder; // excludes winner
-      emitToWheel(wheelId, 'wheel:elimination', {
-        wheelId,
-        eliminatedUserId: target.user_id,
-        eliminationOrder: currentOrder,
-        remainingCount,
-      });
-      emitToUser(target.user_id, 'wheel:you_were_eliminated', {
-        wheelId,
-        eliminationOrder: currentOrder,
-      });
+  const remainingCount = participants.length - currentOrder;
+  emitToWheel(wheelId, 'wheel:elimination', {
+    wheelId,
+    eliminatedUserId: target.user_id,
+    eliminationOrder: currentOrder,
+    remainingCount,
+  });
+  emitToUser(target.user_id, 'wheel:you_were_eliminated', {
+    wheelId,
+    eliminationOrder: currentOrder,
+  });
 
-      console.log(`[Elimination] Wheel ${wheelId}: eliminated order ${currentOrder}, remaining=${remainingCount}`);
+  console.log(`[Elimination] Wheel ${wheelId}: eliminated order ${currentOrder}, remaining=${remainingCount}`);
 
-      // Schedule next
-      await scheduleNextElimination(wheelId, currentOrder + 1, participants, intervalSeconds);
-    } catch (err) {
-      console.error(`[Elimination] Elimination step error (order=${currentOrder}, wheel=${wheelId}):`, err.message);
+  await scheduleNextElimination(wheelId, currentOrder + 1, participants, intervalSeconds);
+}
+
+/**
+ * Recovers a spinning wheel by finding the next elimination step.
+ */
+async function resumeSpinningWheel(wheelId) {
+  const pResult = await query(
+    'SELECT id, user_id, elimination_order, eliminated_at FROM spin_wheel_participants WHERE spin_wheel_id = $1 ORDER BY elimination_order ASC',
+    [wheelId],
+  );
+  
+  const participants = pResult.rows.filter(p => p.elimination_order !== null);
+  
+  // Find the first participant who is NOT eliminated
+  const nextTarget = participants.find(p => p.eliminated_at === null);
+  const config = await getConfig();
+
+  if (nextTarget) {
+    console.log(`[Elimination] Resuming wheel ${wheelId} at order ${nextTarget.elimination_order}`);
+    await scheduleNextElimination(wheelId, nextTarget.elimination_order, participants, config.elimination_interval_seconds);
+  } else {
+    // All eliminations done, but winner not finalized
+    console.log(`[Elimination] Resuming wheel ${wheelId} - finalizing winner directly`);
+    await finalizeWinner(wheelId);
+  }
+}
+
+/**
+ * Cancel any pending eliminations (called during abort).
+ */
+async function cancelEliminationInterval(wheelId) {
+  const existingJobs = await eliminationQueue.getDelayed();
+  for (const job of existingJobs) {
+    if (job.data.wheelId === wheelId) {
+      await job.remove();
     }
-  }, intervalSeconds * 1000);
-
-  // Store the latest interval timer so it can be cancelled if needed
-  const entry = activeTimers.get(wheelId);
-  if (entry) entry.eliminationInterval = timer;
+  }
 }
 
 /**
@@ -314,8 +331,9 @@ async function abortWheel(wheelId, reason = 'Wheel aborted') {
 
     // 5. Emit and clean up
     emitToWheel(wheelId, 'wheel:aborted', { wheelId, reason, refundedCount: participants.length });
-    cancelAutoStart(wheelId);
-    cleanupTimers(wheelId);
+    // Cancel any active timers
+    await cancelAutoStart(wheelId);
+    await cancelEliminationInterval(wheelId);
   } catch (err) {
     console.error(`[Elimination] abortWheel error for wheel ${wheelId}:`, err.message);
   }
@@ -411,7 +429,8 @@ async function finalizeWinner(wheelId) {
       amount: winnerAmount,
     });
 
-    cleanupTimers(wheelId);
+    // Clean up
+    await cancelEliminationInterval(wheelId);
   } catch (err) {
     console.error(`[Elimination] finalizeWinner error for wheel ${wheelId}:`, err.message);
   }
@@ -422,5 +441,7 @@ module.exports = {
   cancelAutoStart,
   startWheel,
   abortWheel,
+  executeEliminationStep,
+  resumeSpinningWheel,
   finalizeWinner,
 };
